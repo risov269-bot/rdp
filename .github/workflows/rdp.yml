@@ -12,7 +12,7 @@ on:
 jobs:
   persistent-rdp:
     name: Setup and Maintain RDP Session
-    runs-on: self-hosted  # Uses your own persistent machine
+    runs-on: self-hosted
     timeout-minutes: 360
     
     steps:
@@ -24,18 +24,13 @@ jobs:
         run: |
           Write-Host "Configuring RDP settings..."
           
-          # Enable Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          
-          # Disable Network Level Authentication (for easier connection)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
-          # Configure Windows Firewall for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-          # Restart Remote Desktop service
           Restart-Service -Name TermService -Force
           Write-Host "✓ RDP configured successfully"
 
@@ -44,16 +39,14 @@ jobs:
         run: |
           Write-Host "Setting up RDP user..."
           
-          # Generate secure password
           Add-Type -AssemblyName System.Security
           $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
               Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
           }
           
-          # Ensure password meets complexity requirements
           $passwordChars = @()
           $passwordChars += $charSet.Upper | Get-Random -Count 4
           $passwordChars += $charSet.Lower | Get-Random -Count 4
@@ -63,7 +56,6 @@ jobs:
           
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
-          # Create or update user
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name "RDP" -Password $securePass
               Write-Host "✓ Updated existing RDP user"
@@ -72,11 +64,9 @@ jobs:
               Write-Host "✓ Created new RDP user"
           }
           
-          # Add to required groups
           Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
           
-          # Save credentials to environment
           echo "RDP_USERNAME=RDP" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
@@ -87,7 +77,6 @@ jobs:
         run: |
           Write-Host "Installing/configuring Tailscale..."
           
-          # Check if Tailscale is already installed
           $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (Test-Path $tailscalePath) {
               Write-Host "✓ Tailscale already installed"
@@ -109,17 +98,13 @@ jobs:
         run: |
           Write-Host "Connecting to Tailscale..."
           
-          # Generate unique hostname
           $hostname = "gh-rdp-runner-${{ github.run_id }}"
           $tailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           
-          # Disconnect if already connected
           & $tailscaleExe down > $null 2>&1
           
-          # Connect with auth key
           & $tailscaleExe up --authkey="$env:TAILSCALE_AUTH_KEY" --hostname="$hostname" --accept-routes
           
-          # Wait for IP assignment
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 15) {
@@ -142,7 +127,6 @@ jobs:
         run: |
           Write-Host "Testing RDP connectivity..."
           
-          # Test TCP connection to RDP port
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
           
           if (-not $testResult.TcpTestSucceeded) {
@@ -154,15 +138,15 @@ jobs:
       - name: Display Connection Information
         shell: powershell
         run: |
-          Write-Host "`n" + "="*50
+          Write-Host ("=" * 50)
           Write-Host "         RDP SESSION READY"
-          Write-Host "="*50
+          Write-Host ("=" * 50)
           Write-Host "💻 Address: $($env:TAILSCALE_IP)"
           Write-Host "👤 Username: $($env:RDP_USERNAME)"
           Write-Host "🔑 Password: $($env:RDP_PASSWORD)"
           Write-Host "⏰ Session Duration: ${{ github.event.inputs.duration }} minutes"
           Write-Host "🔄 Workflow Run ID: ${{ github.run_id }}"
-          Write-Host "="*50
+          Write-Host ("=" * 50)
           Write-Host ""
 
       - name: Maintain Session
@@ -170,13 +154,11 @@ jobs:
         run: |
           Write-Host "Starting session maintenance loop..."
           
-          # Calculate end time
           $duration = [int]${{ github.event.inputs.duration }}
           $endTime = (Get-Date).AddMinutes($duration)
           
           Write-Host "Session will remain active until: $endTime"
           
-          # Keep session alive
           while ((Get-Date) -lt $endTime) {
               $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes)
               Write-Host "[$(Get-Date.ToString('HH:mm:ss'))] Session active - $remaining minutes remaining"
