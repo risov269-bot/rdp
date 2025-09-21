@@ -9,29 +9,28 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = Join-Path $env:TEMP "tailscale.msi"
+          $tsUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi'
+          $installerPath = Join-Path $env:TEMP 'tailscale.msi'
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Start-Process -FilePath msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Configure Core RDP & Firewall (enable RDP)
+      - name: Configure RDP & Firewall (enable RDP)
         shell: pwsh
         run: |
-          # Enable Remote Desktop and disable NLA so RDP clients can connect (adjust if you want NLA)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 0 -Force
 
-          # Remove previous rule if present then add rule to allow TCP 3389
-          netsh advfirewall firewall delete rule name="RDP-GHA" || Write-Host "no existing rule"
-          netsh advfirewall firewall add rule name="RDP-GHA" dir=in action=allow protocol=TCP localport=3389
+          # firewall rule
+          netsh advfirewall firewall delete rule name='RDP-GHA' -ErrorAction SilentlyContinue
+          netsh advfirewall firewall add rule name='RDP-GHA' dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
@@ -40,64 +39,58 @@ jobs:
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          # Build a random secure-ish password (12+ chars including special)
-          $rnd = New-Object System.Random
-          $upper = [char[]](65..90) | Get-Random -Count 3
-          $lower = [char[]](97..122) | Get-Random -Count 3
-          $nums  = [char[]](48..57) | Get-Random -Count 3
-          $special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)) | Get-Random -Count 3
-          $raw = $upper + $lower + $nums + $special
-          $password = -join ($raw | Sort-Object { Get-Random })
+          # generate a password (12 chars: upper, lower, digits, special)
+          $Upper = [char[]](65..90)
+          $Lower = [char[]](97..122)
+          $Nums  = [char[]](48..57)
+          $Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          $chars = @()
+          $chars += $Upper | Get-Random -Count 3
+          $chars += $Lower | Get-Random -Count 3
+          $chars += $Nums  | Get-Random -Count 3
+          $chars += $Special | Get-Random -Count 3
+          $password = -join ($chars | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Create user if not exists
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          if (-not (Get-LocalUser -Name 'RDP' -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name 'RDP' -Password $securePass -AccountNeverExpires -PasswordNeverExpires
           } else {
-            # Set password if user exists
-            Set-LocalUser -Name "RDP" -Password $securePass
+            Set-LocalUser -Name 'RDP' -Password $securePass
           }
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'RDP' -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Administrators' -Member 'RDP' -ErrorAction SilentlyContinue
 
-          # Save generated password to file (do NOT print to console if you want secrecy)
-          $outDir = Join-Path $env:TEMP "gha-rdp"
+          # Save credentials into workspace so upload-artifact can find them
+          $outDir = Join-Path $env:GITHUB_WORKSPACE 'gha-rdp'
           New-Item -Path $outDir -ItemType Directory -Force | Out-Null
-          $credsFile = Join-Path $outDir "rdp-creds.txt"
+          $credsFile = Join-Path $outDir 'rdp-creds.txt'
           "USER: RDP" | Out-File -FilePath $credsFile -Encoding utf8
           "PASSWORD: $password" | Out-File -FilePath $credsFile -Encoding utf8 -Append
-
-          Write-Host "Wrote creds to $credsFile"
+          Write-Host "Saved creds to $credsFile"
 
       - name: Bring up Tailscale and capture IP
         shell: pwsh
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          # Unique hostname with run id to reduce collisions
           $host = "gh-runner-$env:GITHUB_RUN_ID"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$host --accept-routes || Write-Host "tailscale up returned non-zero"
 
-          # Wait for tailscale ip assignment
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
+          for ($i = 0; $i -lt 12; $i++) {
             Start-Sleep -Seconds 5
             $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            $retries++
+            if ($tsIP) { break }
           }
 
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP was not assigned"
-            exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP was not assigned"; exit 1 }
 
-          $outDir = Join-Path $env:TEMP "gha-rdp"
-          $ipFile = Join-Path $outDir "tailscale-ip.txt"
+          $outDir = Join-Path $env:GITHUB_WORKSPACE 'gha-rdp'
+          $ipFile = Join-Path $outDir 'tailscale-ip.txt'
           $tsIP | Out-File -FilePath $ipFile -Encoding utf8
 
-          # Create a .rdp file using the Tailscale hostname (clients that use MagicDNS can use hostname)
-          $rdpFile = Join-Path $outDir "gh-runner.rdp"
+          $rdpFile = Join-Path $outDir 'gh-runner.rdp'
           $rdpContent = @"
 full address:s:$host
 username:s:RDP
@@ -106,18 +99,13 @@ authentication level:i:0
 "@
           $rdpContent | Out-File -FilePath $rdpFile -Encoding ascii
 
-          Write-Host "Tailscale IP: $tsIP"
-          Write-Host "Hostname: $host"
-          Write-Host "Saved files to $outDir"
+          Write-Host "Saved IP and .rdp to $outDir"
 
       - name: Upload RDP artifact (creds + .rdp + ip)
         uses: actions/upload-artifact@v4
         with:
           name: rdp-config
-          path: |
-            $env:TEMP\gha-rdp\rdp-creds.txt
-            $env:TEMP\gha-rdp\gh-runner.rdp
-            $env:TEMP\gha-rdp\tailscale-ip.txt
+          path: gha-rdp
 
   use-rdp:
     name: Download artifact and show creds (Ubuntu)
@@ -131,11 +119,13 @@ authentication level:i:0
           path: ./rdp
 
       - name: List downloaded files
+        shell: bash
         run: |
           echo "Files in ./rdp:"
           ls -la ./rdp || true
 
       - name: Show credentials (be careful — this logs the password)
+        shell: bash
         run: |
           echo "==== RDP CREDENTIALS ===="
           cat ./rdp/rdp-creds.txt || true
@@ -143,7 +133,3 @@ authentication level:i:0
           cat ./rdp/tailscale-ip.txt || true
           echo "==== .RDP FILE CONTENT ===="
           cat ./rdp/gh-runner.rdp || true
-
-      # Optional: If you want to create a local .rdp file on this runner (Ubuntu can't directly use it)
-      # you can move it or use it when downloading to your Windows machine from the GitHub run UI.
-      
