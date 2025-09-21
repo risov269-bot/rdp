@@ -18,7 +18,7 @@ jobs:
           $tsUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi'
           $installerPath = Join-Path $env:TEMP 'tailscale.msi'
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          Start-Process -FilePath msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+          Start-Process -FilePath msiexec.exe -ArgumentList '/i', $installerPath, '/quiet', '/norestart' -Wait
           Remove-Item $installerPath -Force
 
       - name: Configure RDP & Firewall (enable RDP)
@@ -28,7 +28,6 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 0 -Force
 
-          # firewall rule
           netsh advfirewall firewall delete rule name='RDP-GHA' -ErrorAction SilentlyContinue
           netsh advfirewall firewall add rule name='RDP-GHA' dir=in action=allow protocol=TCP localport=3389
 
@@ -39,17 +38,9 @@ jobs:
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          # generate a password (12 chars: upper, lower, digits, special)
-          $Upper = [char[]](65..90)
-          $Lower = [char[]](97..122)
-          $Nums  = [char[]](48..57)
-          $Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
-          $chars = @()
-          $chars += $Upper | Get-Random -Count 3
-          $chars += $Lower | Get-Random -Count 3
-          $chars += $Nums  | Get-Random -Count 3
-          $chars += $Special | Get-Random -Count 3
-          $password = -join ($chars | Sort-Object { Get-Random })
+          # generate password (12 chars drawn from printable ranges)
+          $charPool = [char[]](65..90) + [char[]](97..122) + [char[]](48..57) + [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
+          $password = -join ((1..12) | ForEach-Object { $charPool | Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name 'RDP' -ErrorAction SilentlyContinue)) {
@@ -57,10 +48,10 @@ jobs:
           } else {
             Set-LocalUser -Name 'RDP' -Password $securePass
           }
+
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'RDP' -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group 'Administrators' -Member 'RDP' -ErrorAction SilentlyContinue
 
-          # Save credentials into workspace so upload-artifact can find them
           $outDir = Join-Path $env:GITHUB_WORKSPACE 'gha-rdp'
           New-Item -Path $outDir -ItemType Directory -Force | Out-Null
           $credsFile = Join-Path $outDir 'rdp-creds.txt'
@@ -74,29 +65,42 @@ jobs:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          $host = "gh-runner-$env:GITHUB_RUN_ID"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$host --accept-routes || Write-Host "tailscale up returned non-zero"
+          $host = "gh-runner-$($env:GITHUB_RUN_ID)"
+          $tailscaleExe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          if (-not (Test-Path $tailscaleExe)) {
+            # Try Program Files (x86) fallback
+            $tailscaleExe = Join-Path ${env:ProgramFiles(x86)} 'Tailscale\tailscale.exe'
+          }
+
+          if (-not (Test-Path $tailscaleExe)) {
+            Write-Error "Tailscale executable not found at expected locations."
+            exit 1
+          }
+
+          & $tailscaleExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=$host --accept-routes || Write-Host "tailscale up returned non-zero"
 
           $tsIP = $null
           for ($i = 0; $i -lt 12; $i++) {
             Start-Sleep -Seconds 5
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            if ($tsIP) { break }
+            $raw = & $tailscaleExe ip -4
+            if ($raw) {
+              $tsIP = $raw.Trim()
+              break
+            }
           }
 
-          if (-not $tsIP) { Write-Error "Tailscale IP was not assigned"; exit 1 }
+          if (-not $tsIP) {
+            Write-Error "Tailscale IP was not assigned"
+            exit 1
+          }
 
           $outDir = Join-Path $env:GITHUB_WORKSPACE 'gha-rdp'
+          New-Item -Path $outDir -ItemType Directory -Force | Out-Null
           $ipFile = Join-Path $outDir 'tailscale-ip.txt'
           $tsIP | Out-File -FilePath $ipFile -Encoding utf8
 
           $rdpFile = Join-Path $outDir 'gh-runner.rdp'
-          $rdpContent = @"
-full address:s:$host
-username:s:RDP
-prompt for credentials:i:1
-authentication level:i:0
-"@
+          $rdpContent = "full address:s:$host`nusername:s:RDP`nprompt for credentials:i:1`nauthentication level:i:0`n"
           $rdpContent | Out-File -FilePath $rdpFile -Encoding ascii
 
           Write-Host "Saved IP and .rdp to $outDir"
@@ -133,3 +137,4 @@ authentication level:i:0
           cat ./rdp/tailscale-ip.txt || true
           echo "==== .RDP FILE CONTENT ===="
           cat ./rdp/gh-runner.rdp || true
+          
